@@ -1,0 +1,60 @@
+schema_version: 1
+id: ai-2026-27-assignment-01
+version: 1.0.0
+title: Uninformed Search Techniques
+course: Artificial Intelligence
+academic_year: 2026-2027
+status: provisional
+configuration_notes:
+  - Official scoring weights, language, report format, and landscape definitions are unconfirmed.
+  - Rubric scores are provisional until configured and approved by an instructor.
+  - Rotating Workforce Scheduling constraints must be supplied; none are assumed.
+course_topics: [search_spaces, problem_representation, constraints, objectives, DFS, BFS, IDDFS, backtracking, state_space]
+tasks:
+  - id: social_golfers
+    title: Social Golfers Problem
+    description: Schedule n=g*p golfers into g groups of p over configurable weeks without repeating a pair.
+    algorithms: [DFS, backtracking]
+    deliverables: [problem_modeling, solution_representation, variables_and_domains, constraints, objective_function, search_space_or_landscape]
+    parameters: {n: 32, groups: 8, group_size: 4, weeks: null}
+    constraints: [each_golfer_exactly_one_group_per_week, group_size_and_distinctness, all_golfers_scheduled, no_pair_repeats]
+    landscape: {interpretation: configurable, default_assumption: weekly partitions examined; distinguish theoretical and feasible counts}
+    evidence: [source_references, tests_or_execution_trace, mathematical_derivation]
+  - id: sudoku
+    title: Sudoku Solver
+    algorithms: [BFS, backtracking]
+    deliverables: [problem_modeling, solution_representation, variables_domains_constraints, objective_function, search_space_or_landscape]
+    difficulty_levels: [Easy, Medium, Hard]
+    fixtures: []
+    constraints: [dimensions, clue_preservation, rows, columns, subgrids, solution_validity, algorithm_identity, meaningful_difficulty_support]
+    landscape: {interpretation: configurable, default_assumption: assignments over empty cells before validity filtering}
+    evidence: [source_references, fixtures, tests_or_execution_trace]
+  - id: latin_square
+    title: Latin Square
+    algorithms: [IDDFS, backtracking]
+    deliverables: [problem_modeling, solution_representation, variables_domains_constraints, objective_function, search_space_or_landscape]
+    parameters: {n: configurable_positive_integer}
+    constraints: [dimensions, symbol_domain, each_symbol_once_per_row, each_symbol_once_per_column, iddfs_and_backtracking, depth_and_termination, multiple_n]
+    landscape: {interpretation: configurable, default_assumption: n^(n*n) raw cell assignments before constraints}
+    evidence: [source_references, tests_or_execution_trace, mathematical_derivation]
+  - id: search_trees
+    title: Search Trees
+    problems:
+      - {id: eight_puzzle, required: [state_representation, initial_state, goal_state, legal_actions, transitions, repeated_state_handling, tree_or_diagram]}
+      - {id: missionaries_cannibals, required: [state_representation, initial_state, goal_state, population, boat_capacity, legal_crossings, bank_safety, transitions, repeated_state_handling, tree_or_diagram]}
+      - {id: rotating_workforce, required: [state_representation, initial_state, goal_state, legal_actions, transitions, tree_or_diagram], constraints_source: instructor_or_student_specification, do_not_invent_constraints: true, validation_rules: {}}
+    executable_search_required: false
+    evidence: [source_references, diagrams_or_equivalent_artifacts]
+knowledge_base:
+  reference_topics: [Turing Test, AI history, state spaces, constraints, objectives, BFS, DFS, IDDFS, backtracking, heuristics, CSP, SAT, local search, adversarial search]
+rubric:
+  version: provisional-1
+  provisional: true
+  maximum_score: null
+  criteria: []
+  note: No official point weights were supplied; configure before issuing a grade.
+similarity:
+  compare_within_assignment: true
+  exclude_paths: [vendor, node_modules, dist, build, generated, __pycache__]
+  starter_code: []
+repositories: []

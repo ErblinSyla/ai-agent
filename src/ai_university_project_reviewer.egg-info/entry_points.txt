@@ -1,0 +1,2 @@
+[console_scripts]
+ai-reviewer = reviewer.cli:main

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI qualitative review response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {"type": "string", "maxLength": 2000},
+    "findings": {
+      "type": "array", "maxItems": 30,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["task_id", "category", "observations", "assessment", "confidence", "uncertainties", "evidence", "recommendation"],
+        "properties": {
+          "task_id": {"type": "string"},
+          "category": {"type": "string", "enum": ["requirement_compliance", "problem_formulation", "algorithm_evidence", "correctness", "complexity", "testing", "code_quality", "similarity_context", "general"]},
+          "observations": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 2000}},
+          "assessment": {"type": "string", "maxLength": 3000},
+          "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+          "uncertainties": {"type": "array", "maxItems": 10, "items": {"type": "string", "maxLength": 2000}},
+          "evidence": {
+            "type": "array", "maxItems": 20,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["path", "line_start", "line_end"],
+              "properties": {
+                "path": {"type": "string"},
+                "line_start": {"type": ["integer", "null"], "minimum": 1},
+                "line_end": {"type": ["integer", "null"], "minimum": 1}
+              }
+            }
+          },
+          "recommendation": {"type": "string", "maxLength": 3000}
+        }
+      }
+    }
+  }
+}

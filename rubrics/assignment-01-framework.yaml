@@ -1,0 +1,16 @@
+version: 1
+assignment_id: ai-2026-27-assignment-01
+status: qualitative-template-unapproved
+approved_by_instructor: false
+maximum_score: null
+criteria:
+  - {id: social_golfers_model, task_id: social_golfers, category: problem_formulation, weight: null, requires: [states, variables, domains, constraints, objective, search_space_derivation]}
+  - {id: social_golfers_dfs, task_id: social_golfers, category: algorithm_evidence, weight: null, requires: [dfs_backtracking_evidence, valid_schedule, distinguish_validity_from_optimality]}
+  - {id: sudoku_model, task_id: sudoku, category: problem_formulation, weight: null, requires: [variables, domains, row_column_box_constraints, search_space_derivation]}
+  - {id: sudoku_solver, task_id: sudoku, category: correctness_and_algorithm, weight: null, requires: [clue_preservation, valid_solution, bfs_backtracking_evidence, easy_medium_hard_support]}
+  - {id: latin_square_model, task_id: latin_square, category: problem_formulation, weight: null, requires: [variables, domains, row_column_constraints, search_space_derivation]}
+  - {id: latin_square_iddfs, task_id: latin_square, category: algorithm_evidence, weight: null, requires: [iddfs_backtracking_evidence, depth_termination, multiple_n_support, valid_square]}
+  - {id: search_trees, task_id: search_trees, category: state_space, weight: null, requires: [8_puzzle_tree, missionaries_cannibals_tree, configured_workforce_tree]}
+double_counting:
+  rule: One underlying defect should be assigned to the single most relevant criterion; cross-reference rather than deducting twice.
+  requires_instructor_mapping: true
