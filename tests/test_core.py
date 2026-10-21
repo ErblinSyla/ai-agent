@@ -531,6 +531,82 @@ def test_ai_prompt_budget_rejects_irreducibly_large_request_before_http():
     send.assert_not_called()
 
 
+def _representative_source_free_findings():
+    return {"findings": [
+        {"task_id": "social_golfers", "status": "validated output", "output_validation": {"valid": True, "weeks": 4, "distinct_pairs": 36, "errors": []}, "algorithm_compliance": {"required": ["DFS", "backtracking"], "analysis": {"DFS": {"status": "static structural evidence", "confidence": "medium"}, "backtracking": {"status": "static structural evidence", "confidence": "medium"}}}},
+        {"task_id": "sudoku", "status": "validated output", "output_validation": {"valid": True, "fixtures": {name: {"valid": True, "errors": []} for name in ("easy", "medium", "hard")}, "missing_difficulty_levels": []}, "algorithm_compliance": {"required": ["BFS", "backtracking"], "analysis": {"BFS": {"status": "static structural evidence"}, "backtracking": {"status": "static structural evidence"}}}},
+        {"task_id": "latin_square", "status": "validated output", "output_validation": {"valid": True, "errors": []}, "algorithm_compliance": {"required": ["IDDFS", "backtracking"], "analysis": {"IDDFS": {"status": "not detected statically"}, "backtracking": {"status": "static structural evidence"}}}},
+        {"task_id": "search_trees", "status": "invalid output", "output_validation": {"valid": False, "problems": {
+            "eight_puzzle": {"valid": True, "state_count": 10, "edge_count": 10, "errors": [], "manual_review": []},
+            "missionaries_cannibals": {"valid": False, "state_count": 14, "edge_count": 13, "errors": ["missionaries/cannibals initial state differs from configured initial state", "missionaries/cannibals goal differs from configured goal", "missionaries/cannibals edge 0 violates boat capacity, direction, or crossing"], "manual_review": []},
+            "rotating_workforce": {"valid": True, "state_count": 7, "edge_count": 6, "errors": [], "manual_review": ["no complete domain transition rules are configured"]},
+        }}, "algorithm_compliance": {"required": [], "analysis": {}}},
+    ]}
+
+
+def test_source_free_ai_prompt_prioritizes_four_tasks_and_specific_validator_facts():
+    from reviewer.llm import _build_ai_prompt, _source_free_review_facts
+    deterministic = _representative_source_free_findings()
+    assignment = load_assignment("assignments/2026-27/assignment-01.yaml")
+    repo = {"name": "student", "sha": "abc", "files": {"private.py": "PRIVATE_SOURCE_MUST_NOT_BE_SENT"}}
+    system, user = _build_ai_prompt(assignment, deterministic, repo, False, [], response_schema_in_api=True)
+    evidence = json.loads(user.split("Evidence JSON:\n", 1)[1])
+    compact = {item["task_id"]: item for item in evidence["deterministic_findings"]["findings"]}
+    tasks = {item["id"]: item for item in evidence["assignment"]["tasks"]}
+    assert {"social_golfers", "sudoku", "latin_square", "search_trees"} == set(compact)
+    assert tasks["social_golfers"]["algorithms"] == ["DFS", "backtracking"]
+    assert "no_pair_repeats" in tasks["social_golfers"]["constraints"]
+    assert tasks["sudoku"]["difficulty_levels"] == ["Easy", "Medium", "Hard"]
+    assert "depth_and_termination" in tasks["latin_square"]["constraints"]
+    assert "rotating_workforce" in {problem["id"] for problem in tasks["search_trees"]["problems"]}
+    assert all(compact[key]["source_free_review_facts"] for key in compact)
+    assert "task attribution and runtime behavior are not established" in compact["sudoku"]["algorithm_compliance"]["scope_note"]
+    assert "edge 0 violates boat capacity, direction, or crossing" in " ".join(compact["search_trees"]["source_free_review_facts"])
+    assert "no complete domain transition rules are configured" in " ".join(compact["search_trees"]["source_free_review_facts"])
+    assert "for search_trees, cover every listed problem fact" in system
+    assert "Never ask for source to be uploaded or provided to this service" in system
+    assert evidence["source_excerpts"] == [] and evidence["source_upload_included"] is False
+    assert "PRIVATE_SOURCE_MUST_NOT_BE_SENT" not in user
+
+
+def test_source_free_ai_result_must_address_validator_facts_not_generic_algorithm_uncertainty():
+    from reviewer.llm import validate_response, _source_free_review_facts
+    deterministic = _representative_source_free_findings()
+    findings = []
+    for item in deterministic["findings"]:
+        facts = _source_free_review_facts(item)
+        findings.append({
+            "task_id": item["task_id"], "category": "correctness", "observations": facts,
+            "assessment": f"The deterministic task result is: {facts[0]}", "confidence": "low",
+            "uncertainties": ["This does not establish that the student solver ran or used the required algorithm."],
+            "evidence": [], "recommendation": "Check this result with targeted local tests and instructor-side inspection; do not upload source.",
+        })
+    specific = {"summary": "The submitted outputs include both accepted cases and concrete transition failures; no code was executed.", "findings": findings}
+    assert validate_response(specific, {}, deterministic, False)
+    paraphrased = json.loads(json.dumps(specific))
+    search = next(item for item in paraphrased["findings"] if item["task_id"] == "search_trees")
+    search["observations"] = [
+        "Eight puzzle: validator accepted graph (10 states, 10 edges).",
+        "Missionaries/cannibals: invalid (3 validator errors); 14 states, 13 edges; initial state, goal state, and edge constraints mismatched.",
+        "Rotating workforce: 7 states, 6 edges; manual review required because transition rules are not configured.",
+    ]
+    search["recommendation"] = "Compare the submitted missionaries/cannibals states and crossings to the configured rules; ask the instructor to define workforce transitions before validating that tree."
+    assert validate_response(paraphrased, {}, deterministic, False)
+    generic = json.loads(json.dumps(specific))
+    for finding in generic["findings"]:
+        finding["observations"] = ["Cannot confirm algorithm compliance."]
+        finding["assessment"] = "Cannot confirm algorithm compliance."
+        finding["recommendation"] = "Provide source code and tests."
+    with pytest.raises(ValueError, match="did not address supplied deterministic evidence"):
+        validate_response(generic, {}, deterministic, False)
+    source_request = json.loads(json.dumps(specific))
+    source_request["findings"][0]["recommendation"] = "Provide source code and tests."
+    with pytest.raises(ValueError, match="asks for source code despite source-free mode"):
+        validate_response(source_request, {}, deterministic, False)
+    source_request["findings"][0]["recommendation"] = "Do not upload source code; inspect it locally and run targeted tests."
+    assert validate_response(source_request, {}, deterministic, False)
+
+
 def test_local_dotenv_loads_missing_values_and_preserves_shell_precedence(tmp_path,monkeypatch):
     from reviewer.reviewer_config import load_local_environment
     env_file=tmp_path/".env"

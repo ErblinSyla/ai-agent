@@ -66,7 +66,8 @@ def _compact_validation(value):
 
 def _compact_algorithm_compliance(value):
     if not isinstance(value,dict): return {}
-    result={"required":value.get("required",[]),"analysis":{}}
+    result={"required":value.get("required",[]),"analysis":{},
+            "scope_note":"Repository-wide Python AST clues only; task attribution and runtime behavior are not established."}
     for algorithm,details in value.get("analysis",{}).items():
         if not isinstance(details,dict): continue
         item={k:details[k] for k in ("status","confidence","limitation") if k in details}
@@ -102,7 +103,93 @@ def _compact_finding(finding):
     retained={"task_id","task","status","output_validation","algorithm_compliance","evidence_search","search_space"}
     omitted=sorted(key for key in finding if key not in retained)
     if omitted: result["omitted_redundant_fields"]=omitted
+    result["source_free_review_facts"]=_source_free_review_facts(finding)
     return result
+
+def _validation_messages(value, key):
+    messages=value.get(key,[]) if isinstance(value,dict) else []
+    if isinstance(messages,dict): messages=messages.get("sample",[])
+    return [item for item in messages if isinstance(item,str)] if isinstance(messages,list) else []
+
+def _source_free_review_facts(finding):
+    """Build short, factual anchors from validators; never include repository source text."""
+    task_id=finding.get("task_id")
+    validation=finding.get("output_validation")
+    if not isinstance(validation,dict): return []
+    facts=[]
+    if task_id=="social_golfers":
+        if validation.get("valid") is True and isinstance(validation.get("weeks"),int) and isinstance(validation.get("distinct_pairs"),int):
+            facts.append(f"Social Golfers validator accepted a {validation['weeks']}-week schedule with {validation['distinct_pairs']} distinct pairs.")
+    elif task_id=="sudoku":
+        fixtures=validation.get("fixtures")
+        if isinstance(fixtures,dict) and fixtures:
+            names=sorted(name for name,item in fixtures.items() if isinstance(item,dict) and item.get("valid") is True)
+            missing=validation.get("missing_difficulty_levels",[])
+            if names:
+                facts.append(f"Sudoku validator accepted fixtures: {', '.join(names)} ({len(names)} passed); missing difficulty levels: {len(missing) if isinstance(missing,list) else 'unknown'}.")
+            for name,item in fixtures.items():
+                if isinstance(item,dict) and item.get("valid") is False:
+                    examples=_validation_messages(item,"errors")
+                    facts.append(f"Sudoku {name} fixture failed validation: {'; '.join(examples[:2]) or 'validator marked it invalid'}.")
+        elif validation.get("valid") is True:
+            facts.append("Sudoku validator accepted the supplied solution; difficulty coverage remains a separate check.")
+    elif task_id=="latin_square" and validation.get("valid") is True:
+        facts.append("Latin Square validator accepted the supplied board with no reported validation errors.")
+    elif task_id=="search_trees":
+        problems=validation.get("problems",{})
+        order=("eight_puzzle","missionaries_cannibals","rotating_workforce")
+        names=[name for name in order if name in problems]
+        names.extend(name for name in problems if name not in names)
+        for name in names:
+            item=problems.get(name)
+            if not isinstance(item,dict): continue
+            state_count=item.get("state_count")
+            edge_count=item.get("edge_count")
+            detail=(f"{state_count} states and {edge_count} edges" if isinstance(state_count,int) and isinstance(edge_count,int) else "")
+            errors=_validation_messages(item,"errors")
+            manual=_validation_messages(item,"manual_review")
+            if item.get("valid") is False:
+                count=item.get("errors",{}).get("count",len(errors)) if isinstance(item.get("errors"),dict) else len(errors)
+                examples="; ".join(errors[:3])
+                facts.append(f"{name}: invalid ({count} validator errors){'; ' + detail if detail else ''}; examples: {examples or 'no error samples supplied'}.")
+            elif manual:
+                facts.append(f"{name}: {detail + '; ' if detail else ''}manual review required: {'; '.join(manual[:2])}.")
+            elif item.get("valid") is True:
+                facts.append(f"{name}: validator accepted the graph ({detail or 'state and edge counts unavailable'}).")
+    if not facts:
+        status=finding.get("status")
+        if status:
+            facts.append(f"{task_id}: deterministic status is {status}; no more specific validator fact was available.")
+    return facts
+
+def _validate_source_free_grounding(result, deterministic):
+    by_task={finding.get("task_id"):finding for finding in result.get("findings",[]) if isinstance(finding,dict)}
+    for deterministic_finding in deterministic.get("findings",[]) or []:
+        task_id=deterministic_finding.get("task_id")
+        ai_finding=by_task.get(task_id)
+        if not ai_finding: continue
+        facts=_source_free_review_facts(deterministic_finding)
+        if not facts: continue
+        narrative=" ".join(ai_finding.get(key,"") if isinstance(ai_finding.get(key),str) else " ".join(v for v in ai_finding.get(key,[]) if isinstance(v,str)) for key in ("assessment","recommendation","observations","uncertainties"))
+        text=narrative.casefold()
+        def anchors(fact):
+            if task_id=="social_golfers": return (("4-week schedule","4 weeks","four-week schedule","four weeks"),("36 distinct pairs","36 unique pairs","36 pairs"))
+            if task_id=="sudoku": return (("easy","medium","hard"),("3 passed","all three","3 of 3"),("missing difficulty levels: 0","no missing difficulty levels","missing levels: 0"))
+            if task_id=="latin_square": return (("latin square validator accepted","latin square output passed","validator accepted the supplied board"),("no reported validation errors","no validation errors"))
+            if task_id=="search_trees":
+                if fact.startswith("eight_puzzle:"): return (("eight puzzle","8-puzzle"),("10 states",),("10 edges",))
+                if fact.startswith("missionaries_cannibals:"):
+                    return (("missionaries/cannibals","missionaries and cannibals"),("initial",),("goal",),("edge","crossing","boat"),("invalid","violat","illegal","mismatch"))
+                if fact.startswith("rotating_workforce:"): return (("rotating workforce","workforce"),("transition rule","transition constraint"),("not configured","not defined","not specified","missing","manual review"))
+            return ((fact.casefold(),),)
+        missing=[fact for fact in facts if fact.casefold() not in text and any(not any(anchor in text for anchor in group) for group in anchors(fact))]
+        if missing:
+            raise ValueError(f"AI finding for {task_id} did not address supplied deterministic evidence: {missing[0]}")
+        recommendation=ai_finding.get("recommendation","")
+        for match in re.finditer(r"\b(?:provide|upload|send|share|submit)\s+(?:the\s+|your\s+|student\s+)?(?:source(?:\s+code)?|code|source\s+files?)\b",recommendation,re.I):
+            prefix=recommendation[max(0,match.start()-24):match.start()]
+            if not re.search(r"\b(?:not|never|avoid|without|don't|do not)\b",prefix,re.I):
+                raise ValueError(f"AI recommendation for {task_id} asks for source code despite source-free mode")
 
 def _assignment_context(assignment):
     return {k:assignment[k] for k in ("id","version","title","tasks") if k in assignment}
@@ -131,6 +218,24 @@ def _build_ai_prompt(assignment, deterministic, repo, include_source, excerpts, 
                 system+=f"\nConfigured {label}: "+" | ".join(_bounded_text(item,180) for item in entries)
         instruction=reviewer_config.get("llm",{}).get("system_instruction")
         if instruction: system+="\nAdditional configured instruction: "+_bounded_text(instruction,700)
+    if not include_source:
+        system+=("\nSOURCE-FREE OUTPUT RULES: Every finding must contain all schema keys, including a non-empty "
+                 "recommendation: task_id, category, observations, assessment, confidence, uncertainties, evidence, "
+                 "recommendation. Keep evidence=[]; configured source-citation instructions do not override this. "
+                 "Include exact facts from that task's source_free_review_facts in observations; for search_trees, cover "
+                 "every listed problem fact. These are validator facts, not source citations. Separate artifact validation "
+                 "from algorithm compliance: a passing artifact does not establish solver execution or algorithm use, and "
+                 "an invalid artifact does not prove the algorithm wrong. Reflect algorithm statuses as written; "
+                 "repository-wide AST clues may be unrelated, and 'not detected statically' does not prove absence. "
+                 "Do not attribute a detected algorithm to a task unless the supplied evidence establishes that link; "
+                 "the path is only where the static pattern was observed. "
+                 "Explain the actual failed constraints or missing rules and recommend a specific local check. If rules are "
+                 "missing, ask the instructor to define the rules before judging. Do not assume a configuration error: "
+                 "for initial/goal mismatches, compare the submitted states with the configured states before suggesting "
+                 "a correction. For missing workforce rules, ask the instructor to specify them before revalidation; do "
+                 "not invent constraints. Never ask for source to be uploaded or "
+                 "provided to this service; recommend instructor-side local inspection or targeted local tests. Do not "
+                 "claim execution or tests absent from the evidence.")
     pairs=deterministic.get("similarity_context") or []
     similarity=[{"repository_a":x.get("repository_a"),"repository_b":x.get("repository_b"),
                  "exact_match_count":len(x.get("exact_matches",[])),"normalized_match_count":len(x.get("normalized_matches",[])),
@@ -334,10 +439,11 @@ class OpenAICompatibleProvider:
         citation_evidence=deterministic if include_source else _sent_citation_evidence(deterministic)
         system,user=_build_ai_prompt(assignment,deterministic,repo,include_source,excerpts,reviewer_config,self._uses_groq_strict_schema())
         result,usage=self.complete(system,user,source_sent=include_source)
-        validate_response(result,files,citation_evidence,include_source,allowed if include_source else None)
+        validate_response(result,files,citation_evidence,include_source,allowed if include_source else None,
+                          deterministic if not include_source else None)
         return {"status":"completed","provider":"OpenAI-compatible","model":self.model,"source_code_sent":include_source,"usage":usage,"interpretation_type":"AI qualitative interpretation; not a verified test or deterministic finding","result":result,"omitted_source_files":omitted}
 
-def validate_response(result,files,deterministic,source_sent,source_lines=None):
+def validate_response(result,files,deterministic,source_sent,source_lines=None,grounding=None):
     if not isinstance(result,dict) or set(result)!={"summary","findings"}: raise ValueError("AI response must contain only summary and findings")
     if not isinstance(result["summary"],str) or len(result["summary"])>2000 or not isinstance(result["findings"],list) or len(result["findings"])>30: raise ValueError("AI response summary/findings have invalid types or size")
     known_tasks={x["task_id"] for x in deterministic.get("findings",[])}
@@ -365,6 +471,7 @@ def validate_response(result,files,deterministic,source_sent,source_lines=None):
                 permitted=set(source_lines[path]) if source_sent else allowed_lines[path]
                 if not set(range(start,end+1)).issubset(permitted):
                     raise ValueError(f"AI cited line references that were not supplied to the model (range {start}-{end}; {len(permitted)} supplied lines for this path)")
+    if not source_sent: _validate_source_free_grounding(result,grounding if grounding is not None else deterministic)
     return True
 
 def create_provider(config):
