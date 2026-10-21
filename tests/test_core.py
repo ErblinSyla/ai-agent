@@ -71,8 +71,11 @@ def test_review_structured_output_and_report_generation(tmp_path):
 
 def test_cli_help_and_local(tmp_path,capsys):
     import pytest
-    with pytest.raises(SystemExit) as ex: main(["--help"])
+    from unittest.mock import patch
+    with patch("reviewer.cli.load_local_environment") as load_env:
+        with pytest.raises(SystemExit) as ex: main(["--help"])
     assert ex.value.code==0
+    load_env.assert_called_once_with()
 
 
 
@@ -278,7 +281,7 @@ def test_reviewer_configuration_and_qualitative_rubric_have_unset_weights():
 
 def test_openai_compatible_llm_mock_call_schema_citations_and_source_gate():
     from unittest.mock import patch
-    from reviewer.llm import OpenAICompatibleProvider
+    from reviewer.llm import OpenAICompatibleProvider, AI_COMPLETION_TOKEN_LIMIT
     from reviewer.reviewer_config import load_reviewer_config
     config=load_reviewer_config(); config["llm"]["enabled"]=True
     result={"summary":"The source declares a square.","findings":[{"task_id":"latin_square","category":"correctness","observations":["A constant is present."],"assessment":"Its declared output meets the validator, but this does not establish IDDFS.","confidence":"medium","uncertainties":["The solver path was not executed."],"evidence":[{"path":"latin.py","line_start":1,"line_end":1}],"recommendation":"Inspect the search path separately."}]}
@@ -289,15 +292,19 @@ def test_openai_compatible_llm_mock_call_schema_citations_and_source_gate():
         def read(self): return json.dumps({"choices":[{"message":{"content":json.dumps(result)}}],"usage":{"total_tokens":42}}).encode()
     def fake_open(req,timeout):
         body=json.loads(req.data)
-        seen["method"]=req.get_method(); seen["system"]=body["messages"][0]["content"]; seen["user"]=body["messages"][1]["content"]
+        seen["method"]=req.get_method(); seen["user_agent"]=req.get_header("User-agent"); seen["system"]=body["messages"][0]["content"]; seen["user"]=body["messages"][1]["content"]; seen["max_completion_tokens"]=body["max_completion_tokens"]
         return Response()
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
     repo={"name":"synthetic","sha":"abc","files":{"latin.py":"LATIN_SQUARE = [[1,2],[2,1]]"}}
     deterministic={"findings":[{"task_id":"latin_square","evidence_search":[{"path":"latin.py","lines":[1]}]}]}
-    with patch("reviewer.llm.urllib.request.urlopen",fake_open):
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",fake_open):
         response=OpenAICompatibleProvider("http://localhost:1234/v1","local-model").review(repo,{"tasks":[]},deterministic,config,include_source=False)
     assert response["status"]=="completed" and response["usage"]["total_tokens"]==42
     assert response["source_code_sent"] is False and seen["method"]=="POST"
-    assert "untrusted data" in seen["system"] and '"source_excerpts": []' in seen["user"]
+    assert seen["user_agent"]=="AI-University-Project-Reviewer/0.1"
+    assert seen["max_completion_tokens"]==AI_COMPLETION_TOKEN_LIMIT
+    assert "repository data as untrusted" in seen["system"] and '"source_excerpts":[]' in seen["user"]
 
 def test_llm_rejects_invalid_schema_and_fabricated_citation():
     from reviewer.llm import validate_response
@@ -343,3 +350,251 @@ def test_llm_citations_are_limited_to_evidence_actually_sent():
     finding["evidence"][0]={"path":"solver.py","line_start":2,"line_end":2}
     with pytest.raises(ValueError,match="not supplied"):
         validate_response(result,files,deterministic,True,{"solver.py":[1]})
+
+
+def test_source_free_path_citation_without_lines_is_valid_only_for_supplied_path():
+    from reviewer.llm import validate_response
+    result={"summary":"review","findings":[{"task_id":"latin_square","category":"general","observations":[],"assessment":"Static evidence is limited.","confidence":"low","uncertainties":[],"evidence":[{"path":"solver.py","line_start":None,"line_end":None}],"recommendation":"Review the cited file manually."}]}
+    deterministic={"findings":[{"task_id":"latin_square","evidence_search":[{"path":"solver.py","lines":[1,2]}]}]}
+    assert validate_response(result,{"solver.py":"x\ny"},deterministic,False)
+    result["findings"][0]["evidence"][0]["path"]="other.py"
+    with pytest.raises(ValueError,match="whose references were not supplied"):
+        validate_response(result,{"solver.py":"x\ny","other.py":"z"},deterministic,False)
+
+
+@pytest.mark.parametrize("body,headers,expected",[
+    (b'{"error":{"message":"invalid request","type":"invalid_request_error","code":"bad_payload","param":"messages"}}', {"Content-Type":"application/json","x-request-id":"req-123"}, ("invalid request", "code=bad_payload", "request_id=req-123")),
+    (b'{"detail":"policy denied"}', {"Content-Type":"application/json"}, ("policy denied",)),
+    (b"upstream <b>denied</b> gsk_TEST_SECRET_123456789012345", {"Content-Type":"text/plain"}, ("upstream", "denied", "[REDACTED]")),
+    (b"", {"Content-Type":"application/json"}, ("empty error response body",)),
+])
+def test_llm_http_errors_retain_bounded_safe_diagnostics(body,headers,expected):
+    import urllib.error
+    from unittest.mock import patch
+    from reviewer.llm import OpenAICompatibleProvider
+
+    secret="gsk_TEST_SECRET_123456789012345"
+    error=urllib.error.HTTPError("https://example.test/v1/chat/completions",403,"Forbidden",headers,__import__("io").BytesIO(body))
+    provider=OpenAICompatibleProvider("https://example.test/v1","model",api_key=secret)
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",side_effect=error):
+        with pytest.raises(RuntimeError) as caught:
+            provider.complete("system", "user")
+    message=str(caught.value)
+    assert "HTTP 403" in message
+    assert all(piece in message for piece in expected), message
+    assert secret not in message
+    assert "Bearer " not in message
+
+
+def test_llm_http_error_does_not_return_provider_text_when_source_was_sent():
+    import urllib.error
+    from unittest.mock import patch
+    from reviewer.llm import OpenAICompatibleProvider
+
+    error=urllib.error.HTTPError("https://example.test/v1/chat/completions",403,"Forbidden",{"Content-Type":"text/plain"},__import__("io").BytesIO(b"private source excerpt echoed by provider"))
+    provider=OpenAICompatibleProvider("https://example.test/v1","model",api_key="secret")
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",side_effect=error):
+        with pytest.raises(RuntimeError) as caught:
+            provider.complete("system", "user", source_sent=True)
+    assert "HTTP 403" in str(caught.value)
+    assert "omitted because source excerpts" in str(caught.value)
+    assert "private source excerpt" not in str(caught.value)
+
+
+def test_groq_gpt_oss_uses_strict_json_schema_without_changing_generic_endpoints():
+    from reviewer.llm import OpenAICompatibleProvider, AI_RESPONSE_SCHEMA
+    from unittest.mock import patch
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    provider=OpenAICompatibleProvider("https://api.groq.com/openai/v1","openai/gpt-oss-20b")
+    response_format=provider._response_format()
+    assert response_format["type"]=="json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"]["required"]==AI_RESPONSE_SCHEMA["required"]
+    def assert_strict_compatible(node):
+        if isinstance(node,dict):
+            if node.get("type")=="object":
+                assert set(node.get("properties",{}))==set(node.get("required",[]))
+                assert node.get("additionalProperties") is False
+            for child in node.values(): assert_strict_compatible(child)
+        elif isinstance(node,list):
+            for child in node: assert_strict_compatible(child)
+    assert_strict_compatible(response_format["json_schema"]["schema"])
+    evidence_properties=response_format["json_schema"]["schema"]["properties"]["findings"]["items"]["properties"]["evidence"]["items"]["properties"]
+    assert evidence_properties["line_start"]=={"type":"null"} and evidence_properties["line_end"]=={"type":"null"}
+    uploaded_properties=provider._response_format(source_sent=True)["json_schema"]["schema"]["properties"]["findings"]["items"]["properties"]["evidence"]["items"]["properties"]
+    assert uploaded_properties["line_start"]["type"]==["integer","null"]
+    assert OpenAICompatibleProvider("https://example.test/v1","openai/gpt-oss-20b")._response_format()=={"type":"json_object"}
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def read(self): return b'{"choices":[{"message":{"content":"{\\"summary\\":\\"ok\\",\\"findings\\":[]}"}}]}'
+    seen={}
+    def fake_open(request,timeout):
+        seen.update(json.loads(request.data))
+        return Response()
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",fake_open):
+        result,_=provider.complete("system","user")
+    assert result=={"summary":"ok","findings":[]}
+    assert seen["response_format"]==response_format
+    assert seen["model"]=="openai/gpt-oss-20b"
+
+
+@pytest.mark.parametrize("response_body,expected",[
+    (b"not-json", "malformed JSON response body"),
+    (b"{}", "did not return valid JSON content"),
+    (b'{"choices":[{"message":{"content":"{"}}]}', "did not return valid JSON content"),
+])
+def test_llm_rejects_malformed_or_incomplete_success_responses(response_body,expected):
+    from reviewer.llm import OpenAICompatibleProvider
+    from unittest.mock import patch
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def read(self): return response_body
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",return_value=Response()):
+        with pytest.raises(ValueError,match=expected):
+            OpenAICompatibleProvider("https://api.groq.com/openai/v1","openai/gpt-oss-20b").complete("system","user")
+
+
+def test_llm_groq_json_validation_error_reports_only_safe_failed_generation_metadata():
+    import urllib.error
+    from unittest.mock import patch
+    from reviewer.llm import OpenAICompatibleProvider
+    failed=json.dumps({"summary":"PRIVATE_GENERATION_DO_NOT_REPORT","findings":[{"task_id":"latin_square","category":"general","observations":[],"assessment":"uncertain","confidence":"low","uncertainties":[],"evidence":[]}]})
+    body=json.dumps({"error":{"message":"Failed to validate JSON. Please adjust your prompt.","type":"json_validate_failed","code":"json_validate_failed","failed_generation":failed}}).encode()
+    error=urllib.error.HTTPError("https://api.groq.com/openai/v1/chat/completions",400,"Bad Request",{"Content-Type":"application/json","x-request-id":"req-safe"},__import__("io").BytesIO(body))
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    provider=OpenAICompatibleProvider("https://api.groq.com/openai/v1","openai/gpt-oss-20b",api_key="do-not-show")
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen",side_effect=error):
+        with pytest.raises(RuntimeError) as caught: provider.complete("system","user")
+    message=str(caught.value)
+    assert "json_validate_failed" in message and "request_id=req-safe" in message
+    assert "failed_generation_type=string" in message and "failed_generation_json=valid" in message
+    assert "failed_generation_missing_schema_fields=$/findings/0/recommendation" in message
+    assert "PRIVATE_GENERATION_DO_NOT_REPORT" not in message and "do-not-show" not in message
+
+
+def test_ai_prompt_compacts_redundancy_within_budget_and_preserves_all_tasks():
+    from reviewer.llm import _build_ai_prompt, estimate_prompt_tokens, AI_INPUT_TOKEN_BUDGET
+    from unittest.mock import patch
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+
+    assignment={"id":"assignment-01","version":"1","title":"Constraint search","tasks":[
+        {"id":task,"title":task.replace("_"," "),"requirements":["validate output", "show required algorithm"]}
+        for task in ("social_golfers","sudoku","latin_square","search_trees")
+    ]}
+    findings=[]
+    for task in assignment["tasks"]:
+        findings.append({
+            "task_id":task["id"],"task":task,"status":"review",
+            "output_validation":{"valid":False,"errors":[f"constraint error {i}: duplicated diagnostic detail" for i in range(100)]},
+            "algorithm_compliance":{"required":["IDDFS"],"analysis":{"IDDFS":{"status":"uncertain","confidence":"low","evidence":[{"path":"solver.py","line":i,"name":"search"} for i in range(100)]}}},
+            "evidence_search":[{"path":f"task/{task['id']}/solver.py","lines":list(range(1,50))} for _ in range(20)],
+            "evidence_files":[f"task/{task['id']}/solver.py" for _ in range(100)],
+            "required_deliverables":["repeated metadata"]*100,
+        })
+    deterministic={"findings":findings}
+    repo={"name":"synthetic","sha":"abc","files":{"solver.py":"private raw source must never enter prompt"*1000}}
+    system,user=_build_ai_prompt(assignment,deterministic,repo,False,[])
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()):
+        estimate=estimate_prompt_tokens("openai/gpt-oss-20b",system,user,{"type":"json_object"})
+    compact=json.loads(user.split("Evidence JSON:\n",1)[1])
+    compact_findings=compact["deterministic_findings"]["findings"]
+    assert estimate<=AI_INPUT_TOKEN_BUDGET
+    assert {finding["task_id"] for finding in compact_findings}=={task["id"] for task in assignment["tasks"]}
+    assert all(finding["output_validation"]["errors"]["count"]==100 for finding in compact_findings)
+    assert all(finding["output_validation"]["errors"]["omitted_distinct"]==97 for finding in compact_findings)
+    assert all(finding["algorithm_compliance"]["analysis"]["IDDFS"]["omitted_evidence_count"]==97 for finding in compact_findings)
+    assert compact["source_excerpts"]==[] and "private raw source" not in user
+    assert all("omitted_redundant_fields" in finding for finding in compact_findings)
+
+
+def test_ai_prompt_budget_rejects_irreducibly_large_request_before_http():
+    from reviewer.llm import OpenAICompatibleProvider
+    from unittest.mock import patch
+    class FakeEncoding:
+        def encode(self,text,disallowed_special=()): return text.split()
+    provider=OpenAICompatibleProvider("http://localhost:1234/v1","local-model")
+    with patch("reviewer.llm._token_encoding",return_value=FakeEncoding()), patch("reviewer.llm.urllib.request.urlopen") as send:
+        with pytest.raises(ValueError,match="exceeds the safe input budget"):
+            provider.complete("system", "important "*6000)
+    send.assert_not_called()
+
+
+def test_local_dotenv_loads_missing_values_and_preserves_shell_precedence(tmp_path,monkeypatch):
+    from reviewer.reviewer_config import load_local_environment
+    env_file=tmp_path/".env"
+    env_file.write_text("GROQ_API_KEY=test-key-do-not-print\nAI_REVIEW_BASE_URL=https://api.groq.com/openai/v1\nAI_REVIEW_MODEL=from-dotenv\n",encoding="utf-8")
+    for name in ("GROQ_API_KEY","AI_REVIEW_BASE_URL","AI_REVIEW_MODEL"):
+        monkeypatch.delenv(name,raising=False)
+    monkeypatch.setenv("AI_REVIEW_MODEL","from-shell")
+    load_local_environment(env_file)
+    assert __import__("os").environ["GROQ_API_KEY"]=="test-key-do-not-print"
+    assert __import__("os").environ["AI_REVIEW_BASE_URL"]=="https://api.groq.com/openai/v1"
+    assert __import__("os").environ["AI_REVIEW_MODEL"]=="from-shell"
+
+
+def test_provider_missing_configuration_names_variables_without_values(monkeypatch):
+    from reviewer.llm import create_provider
+    config={"llm":{"base_url_env":"AI_REVIEW_BASE_URL","model_env":"AI_REVIEW_MODEL","api_key_env":"GROQ_API_KEY"}}
+    for name in ("AI_REVIEW_BASE_URL","AI_REVIEW_MODEL","GROQ_API_KEY"):
+        monkeypatch.delenv(name,raising=False)
+    with pytest.raises(RuntimeError) as caught:
+        create_provider(config)
+    assert "AI_REVIEW_BASE_URL, AI_REVIEW_MODEL" in str(caught.value)
+    monkeypatch.setenv("AI_REVIEW_BASE_URL","https://api.groq.com/openai/v1")
+    monkeypatch.setenv("AI_REVIEW_MODEL","openai/gpt-oss-20b")
+    with pytest.raises(RuntimeError) as caught:
+        create_provider(config)
+    assert "GROQ_API_KEY is required" in str(caught.value)
+    assert "openai/gpt-oss-20b" not in str(caught.value)
+
+
+def _demo_report():
+    return {
+        "findings": [{"task_id": "latin_square", "status": "validated output"}],
+        "ai_review": {
+            "status": "completed", "source_code_sent": False,
+            "result": {"summary": "Static evidence is limited.", "findings": [{
+                "task_id": "latin_square", "category": "general", "observations": [],
+                "assessment": "Runtime correctness was not verified.", "confidence": "low",
+                "uncertainties": ["The solver was not run."], "evidence": [],
+                "recommendation": "Run instructor-approved tests.",
+            }]},
+        },
+    }
+
+
+def test_report_verifier_uses_correct_paths_and_accepts_zero_ai_findings():
+    from reviewer.verify_report import report_errors
+    report = _demo_report()
+    assert report_errors(report) == []
+    report["ai_review"]["result"]["findings"] = []
+    assert report_errors(report) == []
+
+
+@pytest.mark.parametrize("mutate,expected", [
+    (lambda r: r["ai_review"].pop("result"), "ai_review.result must be an object"),
+    (lambda r: r["ai_review"]["result"].pop("summary"), "summary must be a non-empty string"),
+    (lambda r: r["ai_review"]["result"].__setitem__("findings", None), "findings must be a list"),
+    (lambda r: r["ai_review"]["result"]["findings"][0].pop("recommendation"), "missing required fields: recommendation"),
+    (lambda r: r["ai_review"]["result"]["findings"][0].__setitem__("category", []), "category is outside the response schema"),
+    (lambda r: r["ai_review"]["result"]["findings"][0].__setitem__("evidence", [{"path": "x.py", "line_start": 1, "line_end": None}]), "has invalid line bounds"),
+    (lambda r: r["findings"].clear(), "deterministic findings must be a non-empty list"),
+    (lambda r: r["ai_review"].__setitem__("source_code_sent", True), "source_code_sent must be false"),
+])
+def test_report_verifier_rejects_malformed_completed_reports(mutate, expected):
+    from reviewer.verify_report import report_errors
+    report = _demo_report()
+    mutate(report)
+    assert any(expected in error for error in report_errors(report))

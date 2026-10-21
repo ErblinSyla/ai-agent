@@ -6,7 +6,7 @@ from .ingestion import ingest_local
 from .github import GitHubClient
 from .orchestration import review
 from .similarity import compare_repositories
-from .reviewer_config import load_reviewer_config
+from .reviewer_config import load_local_environment, load_reviewer_config
 from .llm import create_provider
 
 def _run(repos,spec,args,reviewer_config,provider=None,ai_setup_error=None):
@@ -27,6 +27,7 @@ def _run(repos,spec,args,reviewer_config,provider=None,ai_setup_error=None):
     print(json.dumps({"reviewed":len(reports),"similarity_pairs":len(pairs),"out":str(Path(args.out).resolve())},indent=2))
 
 def main(argv=None):
+    load_local_environment()
     p=argparse.ArgumentParser(prog="ai-reviewer",description="Read-only evidence-based AI course submission reviewer")
     sub=p.add_subparsers(dest="command",required=True)
     def common(q):

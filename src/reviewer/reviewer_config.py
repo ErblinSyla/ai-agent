@@ -1,7 +1,13 @@
 from pathlib import Path
+from dotenv import load_dotenv
 import yaml
 
 REQUIRED_KEYS={"reviewer","llm","rubric_policy"}
+
+def load_local_environment(path=".env"):
+    """Load repository-local environment defaults without overriding the shell."""
+    return load_dotenv(dotenv_path=Path(path), override=False)
+
 def load_reviewer_config(path="config/reviewer.yaml"):
     data=yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data,dict) or not REQUIRED_KEYS.issubset(data): raise ValueError("Reviewer config must contain reviewer, llm, and rubric_policy")
